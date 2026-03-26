@@ -3,15 +3,29 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "@/lib/firebase";
-import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, collection, query, where, getDocs, setDoc } from "firebase/firestore";
+import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { doc, getDoc, collection, query, where, getDocs, setDoc, updateDoc, arrayRemove } from "firebase/firestore";
 import Link from "next/link";
+
+interface UserData {
+  id: string;
+  name: string;
+  email: string;
+  clubs: string[];
+}
+
+interface ClubData {
+  id: string;
+  name: string;
+  adminId: string;
+  members: string[];
+}
 
 export default function ClubPage({ params }: { params: { id: string } }) {
   const router = useRouter();
-  const [user, setUser] = useState<any>(null);
-  const [club, setClub] = useState<any>(null);
-  const [members, setMembers] = useState<any[]>([]);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [club, setClub] = useState<ClubData | null>(null);
+  const [members, setMembers] = useState<UserData[]>([]);
   const [loading, setLoading] = useState(true);
   
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
@@ -34,57 +48,62 @@ export default function ClubPage({ params }: { params: { id: string } }) {
   const loadClubData = async (clubId: string, uid: string, selectedDate: string) => {
     setLoading(true);
     
-    // Load Club
-    const clubSnap = await getDoc(doc(db, "clubs", clubId));
-    if (!clubSnap.exists()) {
-      router.push("/dashboard");
-      return;
-    }
-    const clubData = clubSnap.data();
-    setClub({ id: clubSnap.id, ...clubData });
-
-    // Load Members
-    const loadedMembers = [];
-    for (const memberId of clubData.members) {
-      const userSnap = await getDoc(doc(db, "users", memberId));
-      if (userSnap.exists()) {
-        loadedMembers.push({ id: userSnap.id, ...userSnap.data() });
+    try {
+      // Load Club
+      const clubSnap = await getDoc(doc(db, "clubs", clubId));
+      if (!clubSnap.exists()) {
+        router.push("/dashboard");
+        return;
       }
-    }
-    setMembers(loadedMembers);
+      const clubData = clubSnap.data() as Omit<ClubData, 'id'>;
+      const clubWithId = { id: clubSnap.id, ...clubData };
+      setClub(clubWithId);
 
-    // Load all member statuses for selected date
-    const statuses: Record<string, "ate" | "skipped"> = {};
-    const mealsRef = collection(db, "meals");
-    const q = query(mealsRef, where("clubId", "==", clubId), where("date", "==", selectedDate));
-    const mealsSnap = await getDocs(q);
-    
-    mealsSnap.forEach(doc => {
-      const data = doc.data();
-      statuses[data.userId] = data.status;
-    });
-    
-    setMemberStatuses(statuses);
-    setMealStatus(statuses[uid] || "");
-
-    // Load user's monthly history
-    const monthPrefix = selectedDate.substring(0, 7);
-    const historyQ = query(
-      mealsRef, 
-      where("clubId", "==", clubId), 
-      where("userId", "==", uid)
-    );
-    const historySnap = await getDocs(historyQ);
-    const history: Record<string, "ate" | "skipped"> = {};
-    historySnap.forEach(doc => {
-      const data = doc.data();
-      if (data.date.startsWith(monthPrefix)) {
-        history[data.date] = data.status;
+      // Load Members
+      const loadedMembers: UserData[] = [];
+      for (const memberId of clubData.members) {
+        const userSnap = await getDoc(doc(db, "users", memberId));
+        if (userSnap.exists()) {
+          loadedMembers.push({ id: userSnap.id, ...userSnap.data() } as UserData);
+        }
       }
-    });
-    setMonthlyHistory(history);
-    
-    setLoading(false);
+      setMembers(loadedMembers);
+
+      // Load all member statuses for selected date
+      const statuses: Record<string, "ate" | "skipped"> = {};
+      const mealsRef = collection(db, "meals");
+      const q = query(mealsRef, where("clubId", "==", clubId), where("date", "==", selectedDate));
+      const mealsSnap = await getDocs(q);
+      
+      mealsSnap.forEach(doc => {
+        const data = doc.data();
+        statuses[data.userId] = data.status;
+      });
+      
+      setMemberStatuses(statuses);
+      setMealStatus(statuses[uid] || "");
+
+      // Load user's monthly history
+      const monthPrefix = selectedDate.substring(0, 7);
+      const historyQ = query(
+        mealsRef, 
+        where("clubId", "==", clubId), 
+        where("userId", "==", uid)
+      );
+      const historySnap = await getDocs(historyQ);
+      const history: Record<string, "ate" | "skipped"> = {};
+      historySnap.forEach(doc => {
+        const data = doc.data();
+        if (data.date.startsWith(monthPrefix)) {
+          history[data.date] = data.status;
+        }
+      });
+      setMonthlyHistory(history);
+    } catch (error) {
+      console.error("Error loading club data:", error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleStatusChange = async (status: "ate" | "skipped") => {
@@ -100,6 +119,77 @@ export default function ClubPage({ params }: { params: { id: string } }) {
     setMealStatus(status);
     setMemberStatuses(prev => ({ ...prev, [user.uid]: status }));
     setMonthlyHistory(prev => ({ ...prev, [date]: status }));
+  };
+
+  // Helper function for Firestore logic
+  const leaveClub = async (clubId: string, userId: string) => {
+    const clubRef = doc(db, "clubs", clubId);
+    const userRef = doc(db, "users", userId);
+    
+    await updateDoc(clubRef, {
+      members: arrayRemove(userId)
+    });
+    
+    await updateDoc(userRef, {
+      clubs: arrayRemove(clubId)
+    });
+  };
+
+  const kickMember = async (
+    clubId: string,
+    targetUserId: string,
+    adminId: string,
+    currentUserId: string
+  ) => {
+    if (currentUserId !== adminId) throw new Error("Unauthorized");
+    if (targetUserId === adminId) throw new Error("Admin cannot be removed");
+
+    const clubRef = doc(db, "clubs", clubId);
+    const userRef = doc(db, "users", targetUserId);
+    
+    await updateDoc(clubRef, {
+      members: arrayRemove(targetUserId)
+    });
+    
+    await updateDoc(userRef, {
+      clubs: arrayRemove(clubId)
+    });
+  };
+
+  const handleLeaveClub = async () => {
+    if (!club || !user) return;
+    if (club.adminId === user.uid) {
+      alert("Admin cannot leave the club.");
+      return;
+    }
+
+    if (confirm("Are you sure you want to leave this club?")) {
+      try {
+        setLoading(true);
+        await leaveClub(club.id, user.uid);
+        router.push("/dashboard");
+      } catch (error) {
+        console.error("Error leaving club:", error);
+        alert("Failed to leave club.");
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleKickMember = async (targetUserId: string, targetUserName: string) => {
+    if (!club || !user) return;
+    
+    if (confirm(`Are you sure you want to remove ${targetUserName} from the club?`)) {
+      try {
+        setLoading(true);
+        await kickMember(club.id, targetUserId, club.adminId, user.uid);
+        await loadClubData(club.id, user.uid, date);
+      } catch (error) {
+        console.error("Error removing member:", error);
+        alert("Failed to remove member.");
+        setLoading(false);
+      }
+    }
   };
 
   const renderCalendar = () => {
@@ -151,7 +241,9 @@ export default function ClubPage({ params }: { params: { id: string } }) {
     );
   };
 
-  if (loading) return <div className="p-8">Loading club data...</div>;
+  if (loading || !club || !user) return <div className="p-8">Loading club data...</div>;
+
+  const isAdmin = club.adminId === user.uid;
 
   return (
     <div>
@@ -171,7 +263,7 @@ export default function ClubPage({ params }: { params: { id: string } }) {
           >
             View Monthly Split
           </Link>
-          {club.adminId === user?.uid && (
+          {isAdmin && (
             <Link 
               href={`/club/${club.id}/bill`}
               className="bg-purple-600 text-white px-4 py-2 rounded shadow hover:bg-purple-700 font-medium"
@@ -246,7 +338,7 @@ export default function ClubPage({ params }: { params: { id: string } }) {
                 const status = memberStatuses?.[member.id];
                 return (
                   <div key={member.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                    <span className="font-medium text-sm">{member.name} {member.id === user?.uid && "(You)"}</span>
+                    <span className="font-medium text-sm">{member.name} {member.id === user.uid && "(You)"}</span>
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
                       status === "ate" 
                         ? "bg-green-100 text-green-700" 
@@ -269,13 +361,33 @@ export default function ClubPage({ params }: { params: { id: string } }) {
             <ul className="divide-y divide-gray-100">
               {members.map(member => (
                 <li key={member.id} className="py-3 flex justify-between items-center">
-                  <div>
-                    <p className="font-medium">{member.name}</p>
-                    <p className="text-xs text-gray-500">{member.email}</p>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{member.name}</p>
+                    <p className="text-xs text-gray-500 truncate">{member.email}</p>
                   </div>
-                  {member.id === club.adminId && (
-                    <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Admin</span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {member.id === club.adminId && (
+                      <span className="text-[10px] bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded font-bold uppercase">Admin</span>
+                    )}
+                    
+                    {isAdmin && member.id !== user.uid && (
+                      <button
+                        onClick={() => handleKickMember(member.id, member.name)}
+                        className="text-[10px] text-red-600 hover:bg-red-50 border border-red-200 px-2 py-0.5 rounded font-bold uppercase transition-colors"
+                      >
+                        Remove
+                      </button>
+                    )}
+
+                    {!isAdmin && member.id === user.uid && (
+                      <button
+                        onClick={handleLeaveClub}
+                        className="text-[10px] text-red-600 hover:bg-red-50 border border-red-200 px-2 py-0.5 rounded font-bold uppercase transition-colors"
+                      >
+                        Leave Club
+                      </button>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>
