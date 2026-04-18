@@ -1,4 +1,5 @@
 {
   "buildCommand": "expo export",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "ignoreCommand": "test -n \"$IGNORE_BUILD\""
 }

@@ -35,7 +35,6 @@
     "@types/jest": "29.5.14",
     "@types/react": "~19.2.2",
     "babel-preset-expo": "^55.0.12",
-    "next": "^15.0.0",
     "typescript": "~5.9.2"
   },
   "private": true
