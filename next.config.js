@@ -1,7 +1,11 @@
-module.exports = {
-  // This is a Next.js config stub for Vercel detection
-  // Actual build is handled by vercel.json buildCommand
-  webpack: (config) => {
-    return config;
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // Redirect to Expo's dist output for Vercel
+  distDir: 'dist',
+  // Don't build Next.js, just exist for detection
+  experimental: {
+    webpackBuildWorker: false,
   },
 };
+
+module.exports = nextConfig;
