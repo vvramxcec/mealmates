@@ -1,4 +1,5 @@
 {
+  "framework": "other",
   "buildCommand": "expo export:web",
   "outputDirectory": "web-build"
 }
