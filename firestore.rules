@@ -1,20 +1,70 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // TEMPORARY: Allow all for development. 
-    // CHANGE THIS BEFORE DEPLOYMENT
-    match /{document=**} {
-      allow read, write: if true;
+    
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
     }
     
-    /* 
-    match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+    
+    function isClubMember(clubId) {
+      return isSignedIn() && 
+        get(/databases/$(database)/documents/clubs/$(clubId)).data.members.hasAny([request.auth.uid]);
     }
 
-    match /clubs/{clubId} {
-      allow read, create, update: if request.auth != null;
+    function isValidMealStatus(value) {
+      return value == null || value is bool;
     }
-    */
+
+    function isValidMealsMap(meals) {
+      return meals is map &&
+        meals.keys().hasOnly(['breakfast', 'lunch', 'dinner']) &&
+        isValidMealStatus(meals.breakfast) &&
+        isValidMealStatus(meals.lunch) &&
+        isValidMealStatus(meals.dinner);
+    }
+
+    // User profiles
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(uid);
+    }
+
+    // Clubs
+    match /clubs/{clubId} {
+      allow read: if isClubMember(clubId);
+      allow create: if isSignedIn();
+      allow update, delete: if isSignedIn() && 
+        get(/databases/$(database)/documents/clubs/$(clubId)).data.adminUid == request.auth.uid;
+    }
+
+    // Meal Entries
+    match /mealEntries/{entryId} {
+      // entryId is {uid}_{clubId}_{date}
+      allow read: if isSignedIn() && 
+        (isOwner(resource.data.uid) || isClubMember(resource.data.clubId));
+      
+      allow create, update: if isSignedIn() && 
+        isOwner(request.resource.data.uid) &&
+        isClubMember(request.resource.data.clubId) &&
+        request.resource.data.uid is string &&
+        request.resource.data.clubId is string &&
+        request.resource.data.date is string &&
+        isValidMealsMap(request.resource.data.meals);
+      
+      allow delete: if isSignedIn() && 
+        isOwner(resource.data.uid);
+    }
+
+    // Bills
+    match /bills/{billId} {
+      allow read: if isClubMember(resource.data.clubId);
+      allow write: if isSignedIn() && 
+        get(/databases/$(database)/documents/clubs/$(request.resource.data.clubId)).data.adminUid == request.auth.uid;
+    }
   }
 }

@@ -19,13 +19,20 @@ export const calcBillSplit = functions.firestore
       const mealEntriesRef = admin.firestore().collection('mealEntries');
       const querySnapshot = await mealEntriesRef
         .where('clubId', '==', clubId)
-        .where('ate', '==', true)
         .get();
 
       // Filter by month in memory (Firestore range filters can be limited)
       const entries = querySnapshot.docs.filter(doc => doc.data().date.startsWith(month));
-      
-      const totalMealsEaten = entries.length;
+
+      const countEatenMeals = (meals: any): number => {
+        if (!meals || typeof meals !== 'object') return 0;
+        const values = [meals.breakfast, meals.lunch, meals.dinner];
+        return values.filter(value => value === true).length;
+      };
+
+      const totalMealsEaten = entries.reduce((acc, entryDoc) => {
+        return acc + countEatenMeals(entryDoc.data().meals);
+      }, 0);
 
       if (totalMealsEaten === 0) {
         console.warn('No meals eaten in this period');
@@ -40,8 +47,11 @@ export const calcBillSplit = functions.firestore
       // Group meals by user
       const userMealCounts: Record<string, number> = {};
       entries.forEach(entryDoc => {
-        const { uid } = entryDoc.data();
-        userMealCounts[uid] = (userMealCounts[uid] || 0) + 1;
+        const data = entryDoc.data();
+        const mealsEaten = countEatenMeals(data.meals);
+        if (mealsEaten > 0) {
+          userMealCounts[data.uid] = (userMealCounts[data.uid] || 0) + mealsEaten;
+        }
       });
 
       // Calculate splits

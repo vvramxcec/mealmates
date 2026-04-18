@@ -6,21 +6,52 @@ import {
   TouchableOpacity, 
   FlatList, 
   ActivityIndicator,
-  Dimensions 
+  Dimensions,
+  Alert 
 } from 'react-native';
 import { useAppStore } from '../store/useAppStore';
 import { isFirebaseConfigured, db } from '../services/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
 import { ChevronLeft, ChevronRight, Info, Calendar as CalendarIcon } from 'lucide-react-native';
+import { MealEntry } from '../types';
 
 const { width } = Dimensions.get('window');
 const COLUMN_WIDTH = (width - 40) / 7;
 
+type MealType = 'breakfast' | 'lunch' | 'dinner';
+type MealStatus = boolean | null;
+type MealsState = Record<MealType, MealStatus>;
+
+const DEFAULT_MEALS: MealsState = {
+  breakfast: null,
+  lunch: null,
+  dinner: null,
+};
+
+const MEAL_LABELS: Record<MealType, string> = {
+  breakfast: 'Breakfast',
+  lunch: 'Lunch',
+  dinner: 'Dinner',
+};
+
+const createMealsState = (): MealsState => ({ ...DEFAULT_MEALS });
+
+const normalizeMeals = (meals: Partial<MealsState> | undefined): MealsState => ({
+  breakfast: meals?.breakfast ?? null,
+  lunch: meals?.lunch ?? null,
+  dinner: meals?.dinner ?? null,
+});
+
+const getMealCount = (meals: MealsState): number =>
+  (meals.breakfast ? 1 : 0) + (meals.lunch ? 1 : 0) + (meals.dinner ? 1 : 0);
+
 const CalendarScreen = () => {
   const { activeClub, user } = useAppStore();
   const [selectedDate, setSelectedDate] = useState(new Date());
-  const [mealHistory, setMealHistory] = useState<Record<string, boolean>>({});
+  const [mealHistory, setMealHistory] = useState<Record<string, MealsState>>({});
+  const [selectedDateKey, setSelectedDateKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [togglingDate, setTogglingDate] = useState<string | null>(null);
 
   const daysInMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0).getDate();
   const firstDayOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1).getDay();
@@ -36,20 +67,22 @@ const CalendarScreen = () => {
 
     setLoading(true);
     try {
-      const history: Record<string, boolean> = {};
+      const history: Record<string, MealsState> = {};
       
       if (!isFirebaseConfigured) {
-        // MOCK DATA: Generate random history for the month
-        console.log("Calendar: Generating Mock History");
-        for (let i = 1; i <= daysInMonth; i++) {
-          const dateStr = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
-          // Randomly assign ate (60%), skipped (30%), or no entry (10%)
-          const rand = Math.random();
-          if (rand > 0.4) history[dateStr] = true;
-          else if (rand > 0.1) history[dateStr] = false;
+        // MOCK DATA: Generate random history for the month if none exists
+        if (Object.keys(mealHistory).length === 0) {
+          for (let i = 1; i <= daysInMonth; i++) {
+            const dateStr = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+            history[dateStr] = {
+              breakfast: Math.random() > 0.5 ? true : false,
+              lunch: Math.random() > 0.5 ? true : false,
+              dinner: Math.random() > 0.5 ? true : false,
+            };
+          }
+          setMealHistory(history);
         }
       } else {
-        // REAL FIREBASE LOGIC
         const startOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1).toISOString().split('T')[0];
         const endOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0).toISOString().split('T')[0];
 
@@ -62,12 +95,13 @@ const CalendarScreen = () => {
         );
 
         const querySnapshot = await getDocs(q);
-        querySnapshot.forEach((doc) => {
-          const data = doc.data();
-          history[data.date] = data.ate;
+        const fetchedHistory: Record<string, MealsState> = {};
+        querySnapshot.forEach((entryDoc) => {
+          const data = entryDoc.data();
+          fetchedHistory[data.date] = normalizeMeals(data.meals);
         });
+        setMealHistory(fetchedHistory);
       }
-      setMealHistory(history);
     } catch (error) {
       console.error("Error fetching calendar history:", error);
     } finally {
@@ -75,35 +109,98 @@ const CalendarScreen = () => {
     }
   };
 
+  const updateMealForDate = async (dateStr: string, mealType: MealType, status: boolean) => {
+    if (!user || !activeClub) return;
+
+    setTogglingDate(dateStr);
+    const currentMeals = mealHistory[dateStr] ?? createMealsState();
+    const nextMeals = {
+      ...currentMeals,
+      [mealType]: currentMeals[mealType] === status ? null : status,
+    };
+
+    try {
+      if (isFirebaseConfigured) {
+        const entryId = `${user.uid}_${activeClub.clubId}_${dateStr}`;
+        const entry: MealEntry = {
+          uid: user.uid,
+          clubId: activeClub.clubId,
+          date: dateStr,
+          meals: nextMeals,
+        };
+        await setDoc(doc(db, 'mealEntries', entryId), entry, { merge: true });
+      }
+
+      setMealHistory(prev => {
+        return {
+          ...prev,
+          [dateStr]: nextMeals,
+        };
+      });
+    } catch (error) {
+      Alert.alert("Error", "Failed to update meal status.");
+    } finally {
+      setTogglingDate(null);
+    }
+  };
+
   const changeMonth = (offset: number) => {
     const newDate = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + offset, 1);
     setSelectedDate(newDate);
+    setSelectedDateKey(null);
+    if (!isFirebaseConfigured) setMealHistory({}); // Reset mock for new month
+  };
+
+  const handleSelectDate = (day: number) => {
+    const dateStr = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    setSelectedDateKey(dateStr);
   };
 
   const renderDay = (day: number | null) => {
     if (day === null) return <View style={styles.dayCell} />;
 
     const dateStr = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    const status = mealHistory[dateStr];
+    const meals = mealHistory[dateStr] ?? createMealsState();
+    const mealCount = getMealCount(meals);
     const isToday = new Date().toISOString().split('T')[0] === dateStr;
+    const isToggling = togglingDate === dateStr;
+    const isSelected = selectedDateKey === dateStr;
 
     return (
-      <View style={styles.dayCell}>
+      <TouchableOpacity 
+        style={[styles.dayCell, isSelected && styles.selectedDayCell]} 
+        onPress={() => handleSelectDate(day)}
+        disabled={isToggling}
+      >
         <View style={[
           styles.dayCircle,
-          status === true && styles.ateCircle,
-          status === false && styles.skippedCircle,
-          isToday && styles.todayCircle
+          mealCount > 0 && styles.ateCircle,
+          mealCount === 0 && Object.values(meals).some((status) => status === false) && styles.skippedCircle,
+          isToday && mealCount === 0 && styles.todayCircle,
+          isToday && mealCount > 0 && [styles.ateCircle, { borderWidth: 2, borderColor: '#fff' }],
         ]}>
-          <Text style={[
-            styles.dayText,
-            status !== undefined && styles.activeDayText,
-            isToday && styles.todayText
-          ]}>
-            {day}
-          </Text>
+          {isToggling ? (
+            <ActivityIndicator size="small" color={mealCount === 0 ? "#FF6B6B" : "#fff"} />
+          ) : (
+            <View style={styles.dayLabelWrap}>
+              <Text style={[
+                styles.dayText,
+                mealCount > 0 && styles.activeDayText,
+                isToday && mealCount === 0 && styles.todayText
+              ]}>
+                {day}
+              </Text>
+              <Text style={[
+                styles.mealCountText,
+                mealCount > 0 && styles.activeDayText,
+                isToday && mealCount === 0 && styles.todayText
+              ]}>
+                {mealCount}/3
+              </Text>
+            </View>
+          )}
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -165,14 +262,46 @@ const CalendarScreen = () => {
         />
       )}
 
+      {selectedDateKey && (
+        <View style={styles.editorCard}>
+          <Text style={styles.editorTitle}>
+            {new Date(selectedDateKey).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
+          </Text>
+          {(Object.keys(MEAL_LABELS) as MealType[]).map((mealType) => {
+            const status = (mealHistory[selectedDateKey] ?? createMealsState())[mealType];
+            return (
+              <View key={mealType} style={styles.editorRow}>
+                <Text style={styles.editorMealLabel}>{MEAL_LABELS[mealType]}</Text>
+                <View style={styles.editorButtons}>
+                  <TouchableOpacity
+                    style={[styles.editorButton, status === true && styles.ateButton]}
+                    onPress={() => updateMealForDate(selectedDateKey, mealType, true)}
+                    disabled={togglingDate === selectedDateKey}
+                  >
+                    <Text style={[styles.editorButtonText, status === true && styles.activeButtonText]}>Ate</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.editorButton, status === false && styles.skippedButton]}
+                    onPress={() => updateMealForDate(selectedDateKey, mealType, false)}
+                    disabled={togglingDate === selectedDateKey}
+                  >
+                    <Text style={[styles.editorButtonText, status === false && styles.activeButtonText]}>Skipped</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
       <View style={styles.legend}>
         <View style={styles.legendItem}>
           <View style={[styles.dot, styles.ateDot]} />
-          <Text style={styles.legendText}>Ate</Text>
+          <Text style={styles.legendText}>1-3 meals eaten</Text>
         </View>
         <View style={styles.legendItem}>
           <View style={[styles.dot, styles.skippedDot]} />
-          <Text style={styles.legendText}>Skipped</Text>
+          <Text style={styles.legendText}>Meals skipped only</Text>
         </View>
         <View style={styles.legendItem}>
           <View style={[styles.dot, styles.todayDot]} />
@@ -258,12 +387,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 10,
   },
+  selectedDayCell: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#FFCDD2',
+  },
   dayCircle: {
     width: 36,
-    height: 36,
+    minHeight: 36,
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingVertical: 2,
   },
   ateCircle: {
     backgroundColor: '#4CAF50',
@@ -276,9 +411,17 @@ const styles = StyleSheet.create({
     borderColor: '#FF6B6B',
   },
   dayText: {
-    fontSize: 16,
+    fontSize: 13,
     color: '#495057',
     fontWeight: '500',
+  },
+  dayLabelWrap: {
+    alignItems: 'center',
+  },
+  mealCountText: {
+    fontSize: 9,
+    color: '#6C757D',
+    marginTop: -1,
   },
   activeDayText: {
     color: 'white',
@@ -287,6 +430,61 @@ const styles = StyleSheet.create({
   todayText: {
     color: '#FF6B6B',
     fontWeight: '700',
+  },
+  editorCard: {
+    backgroundColor: 'white',
+    marginHorizontal: 15,
+    marginBottom: 8,
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#F1F3F5',
+  },
+  editorTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#212529',
+    marginBottom: 10,
+  },
+  editorRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  editorMealLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#495057',
+  },
+  editorButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  editorButton: {
+    borderWidth: 1,
+    borderColor: '#DEE2E6',
+    borderRadius: 10,
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    minWidth: 74,
+    alignItems: 'center',
+  },
+  editorButtonText: {
+    fontSize: 13,
+    color: '#495057',
+    fontWeight: '600',
+  },
+  ateButton: {
+    backgroundColor: '#4CAF50',
+    borderColor: '#4CAF50',
+  },
+  skippedButton: {
+    backgroundColor: '#FF6B6B',
+    borderColor: '#FF6B6B',
+  },
+  activeButtonText: {
+    color: 'white',
   },
   legend: {
     flexDirection: 'row',

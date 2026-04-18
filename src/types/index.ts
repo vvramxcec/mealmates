@@ -18,7 +18,11 @@ export interface MealEntry {
   uid: string;
   clubId: string;
   date: string; // ISO format (YYYY-MM-DD)
-  ate: boolean;
+  meals: {
+    breakfast: boolean | null;
+    lunch: boolean | null;
+    dinner: boolean | null;
+  };
 }
 
 export interface BillSplit {

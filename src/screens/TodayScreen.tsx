@@ -6,9 +6,26 @@ import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { MealEntry } from '../types';
 import { Utensils, Info } from 'lucide-react-native';
 
+type MealType = 'breakfast' | 'lunch' | 'dinner';
+type MealStatus = boolean | null;
+
+const DEFAULT_MEALS: Record<MealType, MealStatus> = {
+  breakfast: null,
+  lunch: null,
+  dinner: null,
+};
+
+const createEmptyMeals = (): Record<MealType, MealStatus> => ({ ...DEFAULT_MEALS });
+
+const MEAL_LABELS: Record<MealType, string> = {
+  breakfast: 'Breakfast',
+  lunch: 'Lunch',
+  dinner: 'Dinner',
+};
+
 const TodayScreen = () => {
   const { user, activeClub, isLoading: storeLoading } = useAppStore();
-  const [ate, setAte] = useState<boolean | null>(null);
+  const [meals, setMeals] = useState<Record<MealType, MealStatus>>(createEmptyMeals());
   const [loading, setLoading] = useState(true);
 
   const today = new Date().toISOString().split('T')[0];
@@ -33,9 +50,14 @@ const TodayScreen = () => {
         const docRef = doc(db, 'mealEntries', `${userId}_${clubId}_${today}`);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
-          setAte(docSnap.data().ate);
+          const fetchedMeals = docSnap.data().meals ?? {};
+          setMeals({
+            breakfast: fetchedMeals.breakfast ?? null,
+            lunch: fetchedMeals.lunch ?? null,
+            dinner: fetchedMeals.dinner ?? null,
+          });
         } else {
-          setAte(null);
+          setMeals(createEmptyMeals());
         }
       } catch (error) {
         console.error("Error fetching status:", error);
@@ -46,13 +68,17 @@ const TodayScreen = () => {
     fetchTodayStatus();
   }, [clubId, today, userId]);
 
-  const handleToggle = async (status: boolean) => {
+  const handleToggle = async (mealType: MealType, status: boolean) => {
     if (!userId || !clubId) {
       Alert.alert('Join a Club', 'Please join or create a club first!');
       return;
     }
 
-    setAte(status);
+    const nextMeals = {
+      ...meals,
+      [mealType]: meals[mealType] === status ? null : status,
+    };
+    setMeals(nextMeals);
 
     if (!isFirebaseConfigured) {
       console.log("TodayScreen: Firebase not configured. Saved status locally (Mock).");
@@ -64,7 +90,7 @@ const TodayScreen = () => {
         uid: userId,
         clubId,
         date: today,
-        ate: status,
+        meals: nextMeals,
       };
       const docRef = doc(db, 'mealEntries', `${userId}_${clubId}_${today}`);
       await setDoc(docRef, entry, { merge: true });
@@ -106,29 +132,38 @@ const TodayScreen = () => {
           <View style={styles.card}>
             <Text style={styles.clubLabel}>{activeClub.name}</Text>
             <Text style={styles.dateText}>{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</Text>
-            <Text style={styles.header}>Did you eat at the mess today?</Text>
-            
-            <View style={styles.buttonContainer}>
-              <TouchableOpacity 
-                style={[styles.button, ate === true && styles.ateButton]} 
-                onPress={() => handleToggle(true)}
-              >
-                <Text style={[styles.buttonText, ate === true && styles.activeButtonText]}>Ate</Text>
-              </TouchableOpacity>
+            <Text style={styles.header}>Track today&apos;s meals</Text>
 
-              <TouchableOpacity 
-                style={[styles.button, ate === false && styles.skippedButton]} 
-                onPress={() => handleToggle(false)}
-              >
-                <Text style={[styles.buttonText, ate === false && styles.activeButtonText]}>Skipped</Text>
-              </TouchableOpacity>
+            <View style={styles.mealsContainer}>
+              {(Object.keys(MEAL_LABELS) as MealType[]).map((mealType) => {
+                const status = meals[mealType];
+                return (
+                  <View key={mealType} style={styles.mealRow}>
+                    <Text style={styles.mealLabel}>{MEAL_LABELS[mealType]}</Text>
+                    <View style={styles.buttonContainer}>
+                      <TouchableOpacity
+                        style={[styles.button, status === true && styles.ateButton]}
+                        onPress={() => handleToggle(mealType, true)}
+                      >
+                        <Text style={[styles.buttonText, status === true && styles.activeButtonText]}>Ate</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.button, status === false && styles.skippedButton]}
+                        onPress={() => handleToggle(mealType, false)}
+                      >
+                        <Text style={[styles.buttonText, status === false && styles.activeButtonText]}>Skipped</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {status !== null && (
+                      <Text style={styles.statusInfo}>
+                        {status ? 'Marked as Ate' : 'Marked as Skipped'}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
             </View>
-
-            {ate !== null && (
-              <Text style={styles.statusInfo}>
-                Status: {ate ? "Marked as Ate" : "Marked as Skipped"}
-              </Text>
-            )}
           </View>
         )}
       </View>
@@ -186,6 +221,23 @@ const styles = StyleSheet.create({
     color: '#6C757D',
     marginBottom: 10,
   },
+  mealsContainer: {
+    width: '100%',
+    marginTop: 12,
+    gap: 12,
+  },
+  mealRow: {
+    borderWidth: 1,
+    borderColor: '#E9ECEF',
+    borderRadius: 12,
+    padding: 12,
+  },
+  mealLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#212529',
+    marginBottom: 10,
+  },
   header: {
     fontSize: 22,
     fontWeight: '700',
@@ -201,16 +253,15 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     flexDirection: 'row',
-    marginTop: 20,
     gap: 15,
   },
   button: {
-    paddingVertical: 15,
-    paddingHorizontal: 30,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
     borderRadius: 12,
     borderWidth: 2,
     borderColor: '#E9ECEF',
-    minWidth: 120,
+    minWidth: 100,
     alignItems: 'center',
   },
   ateButton: {
@@ -222,7 +273,7 @@ const styles = StyleSheet.create({
     borderColor: '#FF6B6B',
   },
   buttonText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
     color: '#495057',
   },
@@ -230,8 +281,8 @@ const styles = StyleSheet.create({
     color: 'white',
   },
   statusInfo: {
-    marginTop: 20,
-    fontSize: 14,
+    marginTop: 8,
+    fontSize: 12,
     color: '#6C757D',
     fontStyle: 'italic',
   },
