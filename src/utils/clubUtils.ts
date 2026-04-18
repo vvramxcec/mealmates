@@ -5,22 +5,16 @@ import {
   addDoc, 
   updateDoc, 
   arrayUnion, 
+  arrayRemove,
   query, 
   where, 
   getDocs,
   setDoc,
-  getDoc
+  getDoc,
+  deleteDoc
 } from 'firebase/firestore';
 import { Club, User } from '../types';
-
-export const generateInviteCode = () => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let code = '';
-  for (let i = 0; i < 6; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return code;
-};
+import { generateInviteCode } from './cryptoUtils';
 
 export const createClub = async (name: string, adminUid: string) => {
   const inviteCode = generateInviteCode();
@@ -73,6 +67,36 @@ export const joinClub = async (inviteCode: string, userUid: string) => {
   }, { merge: true });
 
   return { ...clubData, clubId } as Club;
+};
+
+export const kickMember = async (clubId: string, memberUid: string) => {
+  const clubRef = doc(db, 'clubs', clubId);
+  const userRef = doc(db, 'users', memberUid);
+
+  // Remove user from club members
+  await updateDoc(clubRef, {
+    members: arrayRemove(memberUid)
+  });
+
+  // Remove club from user's clubs list
+  await setDoc(userRef, {
+    clubs: arrayRemove(clubId)
+  }, { merge: true });
+};
+
+export const deleteClub = async (clubId: string, memberUids: string[]) => {
+  // 1. Remove clubId from all members' clubs list
+  const updatePromises = memberUids.map(uid => {
+    const userRef = doc(db, 'users', uid);
+    return setDoc(userRef, {
+      clubs: arrayRemove(clubId)
+    }, { merge: true });
+  });
+
+  await Promise.all(updatePromises);
+
+  // 2. Delete the club document
+  await deleteDoc(doc(db, 'clubs', clubId));
 };
 
 export const fetchClubDetails = async (clubId: string) => {

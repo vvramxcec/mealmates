@@ -53,11 +53,20 @@ MealMates is a cross-platform mobile application designed for college roommates 
 - **Navigation**: Uses `@react-navigation/bottom-tabs`.
 - **Firebase Security**: Managed via `firestore.rules` in the root directory.
 
-## Current Progress (Phase 3: System Design/Early Implementation)
+## Current Progress (Phase 4 Complete)
 - Project scaffolded with Expo and TypeScript.
-- Core types and state store defined.
-- Firebase service initialized.
-- Navigation structure implemented.
-- `TodayScreen` functional with Firestore persistence logic.
-- `calcBillSplit` Cloud Function implemented.
-- Firestore security rules drafted.
+- Core types and state store defined with persistence.
+- Firebase service initialized (Auth, Firestore, Storage).
+- Navigation structure implemented (Tab Navigator).
+- All screens (Today, Calendar, Club, BillSplit, Profile) functional with real-time Firestore integration.
+- `calcBillSplit` logic implemented and verified.
+- Club Management (Advanced) fully functional: Create, Join, Kick, Delete.
+- Mock mode support for development without Firebase config.
+
+## Next Steps
+- **Phase 5: Refinement & Polish**
+  - Improved Multi-Club switching UI.
+  - Profile enhancements (Avatar upload, name changes).
+  - Bill settlement workflow (Marking as paid).
+  - Push notification integration for new bills.
+  - Offline persistence optimization.

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   View, 
   Text, 
@@ -6,11 +6,17 @@ import {
   TouchableOpacity, 
   ScrollView, 
   Alert, 
-  ActivityIndicator 
+  ActivityIndicator,
+  Modal,
+  TextInput,
+  Image
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { useAppStore } from '../store/useAppStore';
-import { isFirebaseConfigured, auth } from '../services/firebase';
-import { signOut } from 'firebase/auth';
+import { isFirebaseConfigured, auth, db, storage } from '../services/firebase';
+import { signOut, updateProfile } from 'firebase/auth';
+import { doc, updateDoc } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { 
   User as UserIcon, 
   Mail, 
@@ -21,24 +27,18 @@ import {
   Settings,
   Bell,
   HelpCircle,
-  Info
+  Info,
+  Camera,
+  X,
+  Check
 } from 'lucide-react-native';
 
 const ProfileScreen = () => {
   const { user, setUser, activeClub, setActiveClub, isLoading, setLoading } = useAppStore();
-
-  // Mock User for development if none exists (consistency with other screens)
-  useEffect(() => {
-    if (!user) {
-      setUser({
-        uid: 'dev_user_123',
-        name: 'Dev User',
-        email: 'dev@example.com',
-        avatar: '',
-        clubs: []
-      });
-    }
-  }, [user]);
+  const [isEditModalVisible, setIsEditModalVisible] = useState(false);
+  const [newName, setNewName] = useState(user?.name || '');
+  const [newAvatar, setNewAvatar] = useState(user?.avatar || '');
+  const [updating, setUpdating] = useState(false);
 
   const handleLogout = async () => {
     Alert.alert(
@@ -55,7 +55,6 @@ const ProfileScreen = () => {
               if (isFirebaseConfigured) {
                 await signOut(auth);
               }
-              // Reset local store
               setUser(null);
               setActiveClub(null);
             } catch (error) {
@@ -68,6 +67,70 @@ const ProfileScreen = () => {
         }
       ]
     );
+  };
+
+  const pickImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.5,
+    });
+
+    if (!result.canceled) {
+      setNewAvatar(result.assets[0].uri);
+    }
+  };
+
+  const handleUpdateProfile = async () => {
+    if (!user) return;
+    if (!newName.trim()) {
+      Alert.alert("Error", "Name cannot be empty.");
+      return;
+    }
+
+    setUpdating(true);
+    try {
+      let finalAvatarUrl = user.avatar;
+
+      if (isFirebaseConfigured) {
+        // 1. Upload new image if changed
+        if (newAvatar !== user.avatar && newAvatar.startsWith('file://')) {
+          const response = await fetch(newAvatar);
+          const blob = await response.blob();
+          const storageRef = ref(storage, `avatars/${user.uid}`);
+          await uploadBytes(storageRef, blob);
+          finalAvatarUrl = await getDownloadURL(storageRef);
+        }
+
+        // 2. Update Firebase Auth
+        await updateProfile(auth.currentUser!, {
+          displayName: newName,
+          photoURL: finalAvatarUrl
+        });
+
+        // 3. Update Firestore
+        await updateDoc(doc(db, 'users', user.uid), {
+          name: newName,
+          avatar: finalAvatarUrl
+        });
+      }
+
+      // 4. Update Local Store
+      setUser({
+        ...user,
+        name: newName,
+        avatar: finalAvatarUrl
+      });
+
+      setIsEditModalVisible(false);
+      Alert.alert("Success", "Profile updated successfully!");
+    } catch (error: any) {
+      console.error("Profile update error:", error);
+      Alert.alert("Error", "Failed to update profile: " + error.message);
+    } finally {
+      setUpdating(false);
+    }
   };
 
   if (isLoading || !user) {
@@ -103,8 +166,19 @@ const ProfileScreen = () => {
       {/* Header Profile Section */}
       <View style={styles.header}>
         <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{user.name[0]}</Text>
-          <TouchableOpacity style={styles.editBadge}>
+          {user.avatar ? (
+            <Image source={{ uri: user.avatar }} style={styles.avatarImage} />
+          ) : (
+            <Text style={styles.avatarText}>{user.name[0]}</Text>
+          )}
+          <TouchableOpacity 
+            style={styles.editBadge} 
+            onPress={() => {
+              setNewName(user.name);
+              setNewAvatar(user.avatar);
+              setIsEditModalVisible(true);
+            }}
+          >
             <Settings color="white" size={14} />
           </TouchableOpacity>
         </View>
@@ -112,7 +186,7 @@ const ProfileScreen = () => {
         <Text style={styles.userEmail}>{user.email}</Text>
       </View>
 
-      {/* Stats Section (Horizontal Cards) */}
+      {/* Stats Section */}
       <View style={styles.statsRow}>
         <View style={styles.statCard}>
           <Text style={styles.statVal}>{user.clubs.length}</Text>
@@ -140,7 +214,7 @@ const ProfileScreen = () => {
         </View>
       </View>
 
-      {/* App Settings Section */}
+      {/* Preferences Section */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Preferences</Text>
         <View style={styles.sectionCard}>
@@ -152,13 +226,71 @@ const ProfileScreen = () => {
         </View>
       </View>
 
-      {/* Logout Button */}
       <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
         <LogOut color="#DC3545" size={20} />
         <Text style={styles.logoutText}>Log Out</Text>
       </TouchableOpacity>
 
       <Text style={styles.versionText}>MealMates v1.0.0 (Beta)</Text>
+
+      {/* Edit Profile Modal */}
+      <Modal
+        visible={isEditModalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setIsEditModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <TouchableOpacity onPress={() => setIsEditModalVisible(false)}>
+                <X color="#212529" size={24} />
+              </TouchableOpacity>
+              <Text style={styles.modalTitle}>Edit Profile</Text>
+              <TouchableOpacity onPress={handleUpdateProfile} disabled={updating}>
+                {updating ? (
+                  <ActivityIndicator size="small" color="#FF6B6B" />
+                ) : (
+                  <Check color="#FF6B6B" size={24} />
+                )}
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalBody}>
+              <View style={styles.editAvatarWrapper}>
+                <View style={styles.largeAvatar}>
+                  {newAvatar ? (
+                    <Image source={{ uri: newAvatar }} style={styles.avatarImage} />
+                  ) : (
+                    <Text style={styles.largeAvatarText}>{newName[0] || '?'}</Text>
+                  )}
+                  <TouchableOpacity style={styles.cameraBadge} onPress={pickImage}>
+                    <Camera color="white" size={20} />
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity onPress={pickImage}>
+                  <Text style={styles.changePhotoText}>Change Profile Photo</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Display Name</Text>
+                <TextInput
+                  style={styles.modalInput}
+                  value={newName}
+                  onChangeText={setNewName}
+                  placeholder="Enter your name"
+                  autoFocus
+                />
+              </View>
+
+              <Text style={styles.inputHint}>
+                This name will be visible to all your roommates in your clubs.
+              </Text>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 };
@@ -210,6 +342,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 15,
     position: 'relative',
+  },
+  avatarImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 50,
   },
   avatarText: {
     fontSize: 40,
@@ -335,6 +472,95 @@ const styles = StyleSheet.create({
     color: '#ADB5BD',
     marginTop: 20,
   },
+  // Modal Styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    paddingBottom: 40,
+    height: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F5',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#212529',
+  },
+  modalBody: {
+    padding: 20,
+  },
+  editAvatarWrapper: {
+    alignItems: 'center',
+    marginVertical: 30,
+    gap: 15,
+  },
+  largeAvatar: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: '#FFE3E3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  largeAvatarText: {
+    fontSize: 50,
+    fontWeight: '700',
+    color: '#FF6B6B',
+  },
+  cameraBadge: {
+    position: 'absolute',
+    bottom: 5,
+    right: 5,
+    backgroundColor: '#FF6B6B',
+    padding: 10,
+    borderRadius: 20,
+    borderWidth: 4,
+    borderColor: 'white',
+  },
+  changePhotoText: {
+    color: '#FF6B6B',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#6C757D',
+    marginBottom: 8,
+    marginLeft: 5,
+  },
+  modalInput: {
+    backgroundColor: '#F8F9FA',
+    borderRadius: 15,
+    padding: 15,
+    fontSize: 16,
+    color: '#212529',
+    borderWidth: 1,
+    borderColor: '#E9ECEF',
+  },
+  inputHint: {
+    fontSize: 12,
+    color: '#ADB5BD',
+    textAlign: 'center',
+    paddingHorizontal: 40,
+    lineHeight: 18,
+  }
 });
 
 export default ProfileScreen;

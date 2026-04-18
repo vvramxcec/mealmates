@@ -7,12 +7,23 @@ import {
   TextInput, 
   Alert, 
   FlatList,
-  ActivityIndicator
+  ActivityIndicator,
+  Share
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { useAppStore } from '../store/useAppStore';
 import { db, isFirebaseConfigured } from '../services/firebase';
-import { createClub, joinClub, fetchClubDetails, fetchUserDetails, generateInviteCode } from '../utils/clubUtils';
-import { Users, Plus, UserPlus, Copy, LogOut, Info } from 'lucide-react-native';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { 
+  createClub, 
+  joinClub, 
+  fetchClubDetails, 
+  fetchUserDetails, 
+  generateInviteCode,
+  kickMember,
+  deleteClub
+} from '../utils/clubUtils';
+import { Users, Plus, UserPlus, Copy, LogOut, Info, Trash2, UserMinus, Share2 } from 'lucide-react-native';
 import { Club, User } from '../types';
 
 const ClubScreen = () => {
@@ -23,37 +34,42 @@ const ClubScreen = () => {
   const [inviteCode, setInviteCode] = useState('');
   const [memberDetails, setMemberDetails] = useState<User[]>([]);
 
-  // Mock User for development if none exists
-  useEffect(() => {
-    if (!user) {
-      setUser({
-        uid: 'dev_user_123',
-        name: 'Dev User',
-        email: 'dev@example.com',
-        avatar: '',
-        clubs: []
-      });
-    }
-  }, [user]);
+  const isAdmin = activeClub?.adminUid === user?.uid;
 
-  // Fetch club details if user has clubs but no active club
+  // Real-time listener for club details
   useEffect(() => {
-    const initClub = async () => {
-      if (user && user.clubs.length > 0 && !activeClub) {
-        if (!isFirebaseConfigured) return;
-        setLoading(true);
-        const club = await fetchClubDetails(user.clubs[0]);
-        if (club) setActiveClub(club);
-        setLoading(false);
+    if (!activeClub || !isFirebaseConfigured || activeClub.clubId.startsWith('mock_')) return;
+
+    const unsubscribe = onSnapshot(doc(db, 'clubs', activeClub.clubId), async (docSnap) => {
+      if (docSnap.exists()) {
+        const updatedClub = { ...docSnap.data(), clubId: docSnap.id } as Club;
+        
+        // If members changed, fetch details again
+        if (JSON.stringify(updatedClub.members) !== JSON.stringify(activeClub.members)) {
+          const details = await Promise.all(
+            updatedClub.members.map(uid => fetchUserDetails(uid))
+          );
+          setMemberDetails(details.filter(d => d !== null) as User[]);
+        }
+        
+        setActiveClub(updatedClub);
+      } else {
+        // Club was deleted
+        Alert.alert('Club Deleted', 'This club has been deleted by the admin.');
+        setActiveClub(null);
+        if (user) {
+          setUser({ ...user, clubs: user.clubs.filter(id => id !== activeClub.clubId) });
+        }
       }
-    };
-    initClub();
-  }, [user, activeClub]);
+    });
 
-  // Fetch member names when active club changes
+    return () => unsubscribe();
+  }, [activeClub?.clubId]);
+
+  // Initial fetch for member names when active club changes
   useEffect(() => {
     const fetchMembers = async () => {
-      if (activeClub && isFirebaseConfigured) {
+      if (activeClub && isFirebaseConfigured && memberDetails.length === 0) {
         const details = await Promise.all(
           activeClub.members.map(uid => fetchUserDetails(uid))
         );
@@ -69,8 +85,6 @@ const ClubScreen = () => {
       setLoading(true);
 
       if (!isFirebaseConfigured) {
-        // DEV MODE: Mock a successful creation
-        console.log("Firebase not configured. Using Mock Club.");
         const mockClub: Club = {
           clubId: `mock_${Date.now()}`,
           name: clubName,
@@ -85,15 +99,12 @@ const ClubScreen = () => {
         return;
       }
 
-      console.log("Attempting to create club:", clubName, "for user:", user.uid);
       const newClub = await createClub(clubName, user.uid);
-      console.log("Club created successfully:", newClub.clubId);
       setActiveClub(newClub);
       setUser({ ...user, clubs: [...user.clubs, newClub.clubId] });
       setIsCreating(false);
       setClubName('');
     } catch (error: any) {
-      console.error("Error creating club:", error);
       Alert.alert('Error', `Failed to create club: ${error.message || 'Unknown error'}`);
     } finally {
       setLoading(false);
@@ -122,9 +133,103 @@ const ClubScreen = () => {
     }
   };
 
-  const copyToClipboard = () => {
+  const handleKick = (member: User) => {
+    if (!activeClub) return;
+    Alert.alert(
+      "Remove Member",
+      `Are you sure you want to remove ${member.name} from the club?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Remove", 
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (isFirebaseConfigured) {
+                await kickMember(activeClub.clubId, member.uid);
+              } else {
+                const updatedMembers = activeClub.members.filter(uid => uid !== member.uid);
+                setActiveClub({ ...activeClub, members: updatedMembers });
+              }
+            } catch (error) {
+              Alert.alert("Error", "Failed to remove member.");
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleDeleteClub = () => {
+    if (!activeClub) return;
+    Alert.alert(
+      "Delete Club",
+      "This action is permanent. All club data will be lost. Are you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Delete", 
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (isFirebaseConfigured) {
+                await deleteClub(activeClub.clubId, activeClub.members);
+              }
+              setActiveClub(null);
+            } catch (error) {
+              Alert.alert("Error", "Failed to delete club.");
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleLeaveClub = () => {
+    if (!activeClub || !user) return;
+    if (isAdmin) {
+      Alert.alert("Action Required", "As an admin, you must delete the club or transfer ownership before leaving.");
+      return;
+    }
+
+    Alert.alert(
+      "Leave Club",
+      "Are you sure you want to leave this club?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Leave", 
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (isFirebaseConfigured) {
+                await kickMember(activeClub.clubId, user.uid);
+              }
+              setActiveClub(null);
+            } catch (error) {
+              Alert.alert("Error", "Failed to leave club.");
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const copyToClipboard = async () => {
     if (activeClub) {
-      Alert.alert('Invite Code', `Your club invite code is: ${activeClub.inviteCode}`);
+      await Clipboard.setStringAsync(activeClub.inviteCode);
+      Alert.alert('Copied!', 'Invite code copied to clipboard.');
+    }
+  };
+
+  const onShare = async () => {
+    if (!activeClub) return;
+    try {
+      await Share.share({
+        message: `Join my MealMates club "${activeClub.name}" using this invite code: ${activeClub.inviteCode}`,
+      });
+    } catch (error: any) {
+      Alert.alert(error.message);
     }
   };
 
@@ -201,14 +306,28 @@ const ClubScreen = () => {
       ) : (
         <>
           <View style={styles.headerCard}>
-            <Text style={styles.clubName}>{activeClub.name}</Text>
-            <TouchableOpacity style={styles.inviteContainer} onPress={copyToClipboard}>
-              <Text style={styles.inviteLabel}>Invite Code:</Text>
-              <View style={styles.codeBox}>
-                <Text style={styles.codeText}>{activeClub.inviteCode}</Text>
-                <Copy color="#6C757D" size={16} />
-              </View>
-            </TouchableOpacity>
+            <View style={styles.headerRow}>
+              <Text style={styles.clubName}>{activeClub.name}</Text>
+              {isAdmin && (
+                <View style={styles.adminBadge}>
+                  <Text style={styles.adminBadgeText}>Admin</Text>
+                </View>
+              )}
+            </View>
+            
+            <View style={styles.inviteRow}>
+              <TouchableOpacity style={styles.inviteContainer} onPress={copyToClipboard}>
+                <Text style={styles.inviteLabel}>Invite Code:</Text>
+                <View style={styles.codeBox}>
+                  <Text style={styles.codeText}>{activeClub.inviteCode}</Text>
+                  <Copy color="#6C757D" size={16} />
+                </View>
+              </TouchableOpacity>
+              
+              <TouchableOpacity style={styles.shareButton} onPress={onShare}>
+                <Share2 color="#FF6B6B" size={20} />
+              </TouchableOpacity>
+            </View>
           </View>
 
           <View style={styles.memberSection}>
@@ -221,22 +340,43 @@ const ClubScreen = () => {
                   <View style={styles.avatarPlaceholder}>
                     <Text style={styles.avatarText}>{item.name[0]}</Text>
                   </View>
-                  <View>
+                  <View style={{ flex: 1 }}>
                     <Text style={styles.memberName}>{item.name}</Text>
                     <Text style={styles.memberStatus}>{activeClub.adminUid === item.uid ? 'Admin' : 'Member'}</Text>
                   </View>
+                  {isAdmin && item.uid !== user?.uid && (
+                    <TouchableOpacity onPress={() => handleKick(item)}>
+                      <UserMinus color="#DC3545" size={20} />
+                    </TouchableOpacity>
+                  )}
                 </View>
               )}
             />
           </View>
 
-          <TouchableOpacity 
-            style={styles.leaveButton} 
-            onPress={() => setActiveClub(null)}
-          >
-            <LogOut color="#DC3545" size={20} />
-            <Text style={styles.leaveButtonText}>Switch Club</Text>
-          </TouchableOpacity>
+          <View style={styles.footer}>
+            <TouchableOpacity 
+              style={styles.switchButton} 
+              onPress={() => setActiveClub(null)}
+            >
+              <LogOut color="#6C757D" size={20} />
+              <Text style={styles.switchButtonText}>Switch Club</Text>
+            </TouchableOpacity>
+
+            <View style={styles.dangerZone}>
+              {isAdmin ? (
+                <TouchableOpacity style={styles.dangerButton} onPress={handleDeleteClub}>
+                  <Trash2 color="#DC3545" size={20} />
+                  <Text style={styles.dangerButtonText}>Delete Club</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity style={styles.dangerButton} onPress={handleLeaveClub}>
+                  <UserMinus color="#DC3545" size={20} />
+                  <Text style={styles.dangerButtonText}>Leave Club</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
         </>
       )}
     </View>
@@ -244,16 +384,16 @@ const ClubScreen = () => {
 };
 
 const styles = StyleSheet.create({
+  containerFull: {
+    flex: 1,
+    backgroundColor: '#F8F9FA',
+  },
   container: {
     flex: 1,
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 30,
-  },
-  containerFull: {
-    flex: 1,
-    backgroundColor: '#F8F9FA',
   },
   center: {
     flex: 1,
@@ -351,11 +491,34 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 3,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  adminBadge: {
+    backgroundColor: '#E7F5FF',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  adminBadgeText: {
+    color: '#1971C2',
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
   clubName: {
     fontSize: 22,
     fontWeight: '700',
     color: '#212529',
-    marginBottom: 15,
+  },
+  inviteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 15,
+    marginTop: 5,
   },
   inviteContainer: {
     flexDirection: 'row',
@@ -380,6 +543,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#495057',
     letterSpacing: 1,
+  },
+  shareButton: {
+    backgroundColor: '#FFE3E3',
+    padding: 8,
+    borderRadius: 8,
   },
   memberSection: {
     flex: 1,
@@ -422,14 +590,38 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6C757D',
   },
-  leaveButton: {
+  footer: {
+    padding: 20,
+    backgroundColor: 'white',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    gap: 10,
+  },
+  switchButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
+    paddingVertical: 12,
     gap: 10,
   },
-  leaveButtonText: {
+  switchButtonText: {
+    color: '#6C757D',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  dangerZone: {
+    borderTopWidth: 1,
+    borderTopColor: '#F1F3F5',
+    paddingTop: 10,
+  },
+  dangerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    gap: 10,
+  },
+  dangerButtonText: {
     color: '#DC3545',
     fontSize: 14,
     fontWeight: '600',
